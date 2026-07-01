@@ -567,6 +567,14 @@ class MicrophoneController:
             bool: True если выключен, False если включен
         """
         try:
+            # Добавляем небольшую задержку между вызовами
+            if hasattr(self, '_last_mute_call'):
+                elapsed = time.time() - self._last_mute_call
+                if elapsed < 0.3:  # Не чаще чем раз в 300 мс
+                    return self.mute_status
+
+            self._last_mute_call = time.time()
+
             volume = self.get_device_volume_interface()
             if volume:
                 self.mute_status = volume.GetMute()

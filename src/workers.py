@@ -38,10 +38,11 @@ class MicrophoneWorker(QThread):
                 if self.last_status != status:
                     self.last_status = status
                     self.signals.status_updated.emit(status)
-                time.sleep(0.3)
+                # Увеличиваем интервал до 1 секунды для снижения нагрузки
+                time.sleep(1.0)
             except Exception as e:
                 Logger.log_error("Ошибка в потоке обновления статуса", e)
-                time.sleep(1)
+                time.sleep(2.0)
 
     def stop(self):
         """

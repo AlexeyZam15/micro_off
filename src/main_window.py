@@ -43,7 +43,7 @@ class MicrophoneGUI(QMainWindow):
         self.is_loading = False
         self.ui_initialized = False
         self._updating_combo = False
-        self._ignore_f4 = False
+        self._is_closing = False
 
         # Подключаем сигнал к слоту
         self.update_devices_ui_signal.connect(self.update_devices_ui)
@@ -556,9 +556,40 @@ class MicrophoneGUI(QMainWindow):
     def closeEvent(self, event):
         """
         Обработка закрытия окна.
+        Синхронно включает все устройства и завершает программу.
         """
-        print("Закрытие программы")
+        if self._is_closing:
+            event.accept()
+            return
 
+        self._is_closing = True
+        event.accept()
+
+        print("Закрытие программы...")
+
+        # Сворачиваем окно в трей
+        self.hide()
+
+        # Показываем уведомление о завершении
+        self.tray_icon.showMessage(
+            "MicroOff",
+            "Завершение работы... Включение всех устройств",
+            QSystemTrayIcon.Information,
+            1500
+        )
+
+        # Даем время на показ уведомления
+        time.sleep(0.5)
+
+        # Синхронно включаем все устройства
+        try:
+            print("🔄 Включение всех устройств...")
+            self.controller.unmute_all_devices()
+            print("✅ Все устройства включены")
+        except Exception as e:
+            Logger.log_error("Ошибка включения устройств при закрытии", e)
+
+        # Останавливаем рабочие потоки
         if hasattr(self, 'worker') and self.worker:
             self.worker.stop()
             self.worker.wait()
@@ -575,7 +606,7 @@ class MicrophoneGUI(QMainWindow):
         if hasattr(self, 'hotkey_manager'):
             self.hotkey_manager.unregister_hotkeys()
 
-        event.accept()
+        # Завершаем приложение
         QApplication.quit()
 
     def __del__(self):
@@ -583,6 +614,14 @@ class MicrophoneGUI(QMainWindow):
         Деструктор для очистки ресурсов.
         """
         try:
+            # Включаем все устройства при удалении объекта
+            if hasattr(self, 'controller'):
+                try:
+                    self.controller.unmute_all_devices()
+                    print("✅ Все устройства включены (деструктор)")
+                except:
+                    pass
+
             if hasattr(self, 'worker') and self.worker:
                 self.worker.stop()
                 self.worker.wait()
