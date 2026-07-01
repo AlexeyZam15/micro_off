@@ -1,0 +1,6 @@
+/.venv/
+/build/
+/dist/
+/devices_cache.json
+/error_log.txt
+/MicroOff.spec
