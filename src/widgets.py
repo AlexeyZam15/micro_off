@@ -1,5 +1,6 @@
 """
 Модуль пользовательских виджетов для приложения MicroOff.
+
 Содержит кастомные кнопки, комбобоксы и виджеты горячих клавиш.
 """
 
@@ -49,6 +50,7 @@ class GlassButton(QPushButton):
 class ModernComboBox(QComboBox):
     """
     Современный комбобокс с фиолетовой тематикой и кастомным оформлением.
+    Полностью блокирует все функциональные клавиши (F2-F6).
     """
 
     def __init__(self):
@@ -96,6 +98,39 @@ class ModernComboBox(QComboBox):
                 border-color: #333333;
             }
         """)
+
+    def keyPressEvent(self, event):
+        """
+        Перехват клавиш в комбобоксе.
+        Полностью блокирует F2, F3, F4, F5, F6.
+        """
+        key = event.key()
+
+        # Блокируем все функциональные клавиши
+        if key in (Qt.Key_F2, Qt.Key_F3, Qt.Key_F4, Qt.Key_F5, Qt.Key_F6):
+            event.accept()
+            return
+
+        # Блокируем Alt+F4
+        if key == Qt.Key_F4 and event.modifiers() == Qt.AltModifier:
+            event.accept()
+            return
+
+        # Для всех остальных клавиш - стандартное поведение
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        """
+        Перехват отпускания клавиш в комбобоксе.
+        """
+        key = event.key()
+
+        # Блокируем все функциональные клавиши
+        if key in (Qt.Key_F2, Qt.Key_F3, Qt.Key_F4, Qt.Key_F5, Qt.Key_F6):
+            event.accept()
+            return
+
+        super().keyReleaseEvent(event)
 
 
 class HotkeyWidget(QWidget):

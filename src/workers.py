@@ -17,7 +17,7 @@ class WorkerSignals(QObject):
 class MicrophoneWorker(QThread):
     """
     Поток для фонового обновления статуса микрофона.
-    Просто передает сохраненный статус без опроса системы.
+    Получает реальный статус из системы с периодическим опросом.
     """
 
     def __init__(self, controller):
@@ -29,16 +29,16 @@ class MicrophoneWorker(QThread):
 
     def run(self):
         """
-        Основной цикл - просто передает текущий статус без опроса.
+        Основной цикл - опрашивает статус микрофона.
         """
         while self.running:
             try:
-                # Просто берем сохраненный статус, не обращаясь к системе
-                status = self.controller.update_status_display()
+                # Получаем реальный статус из системы
+                status = self.controller.get_mute_status()
                 if self.last_status != status:
                     self.last_status = status
                     self.signals.status_updated.emit(status)
-                time.sleep(0.5)
+                time.sleep(0.3)
             except Exception as e:
                 Logger.log_error("Ошибка в потоке обновления статуса", e)
                 time.sleep(1)
@@ -65,7 +65,7 @@ class DeviceLoader(QThread):
         Загружает устройства в фоновом режиме.
         """
         try:
-            devices = self.controller.get_devices()
+            devices = self.controller.get_devices(force_refresh=True)
             self.devices_loaded.emit(devices)
         except Exception as e:
             Logger.log_error("Ошибка загрузки устройств", e)

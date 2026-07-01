@@ -1,7 +1,5 @@
 @echo off
-
 chcp 65001 >nul
-
 title Сборка MicroOff
 
 echo ========================================
@@ -28,7 +26,39 @@ rmdir /s /q __pycache__ 2>nul
 rmdir /s /q src\__pycache__ 2>nul
 
 echo Сборка исполняемого файла...
-pyinstaller --onefile --windowed --name="MicroOff" --add-data "src;src" --hidden-import=PyQt5 --hidden-import=PyQt5.QtCore --hidden-import=PyQt5.QtGui --hidden-import=PyQt5.QtWidgets --hidden-import=keyboard --hidden-import=src --hidden-import=src.microphone_controller --hidden-import=src.main_window --hidden-import=src.logger --hidden-import=src.widgets --hidden-import=src.tray_icon --hidden-import=src.hotkey_manager --hidden-import=src.workers --hidden-import=src.ui_builder --hidden-import=subprocess --hidden-import=json --hidden-import=base64 --hidden-import=threading --hidden-import=time --collect-all PyQt5 --collect-all keyboard --clean --noconfirm --runtime-tmpdir="%TEMP%" micro_off.py
+
+pyinstaller --onefile ^
+    --windowed ^
+    --name="MicroOff" ^
+    --add-data "src;src" ^
+    --hidden-import=PyQt5 ^
+    --hidden-import=PyQt5.QtCore ^
+    --hidden-import=PyQt5.QtGui ^
+    --hidden-import=PyQt5.QtWidgets ^
+    --hidden-import=keyboard ^
+    --hidden-import=comtypes ^
+    --hidden-import=pycaw ^
+    --hidden-import=pycaw.pycaw ^
+    --hidden-import=src ^
+    --hidden-import=src.microphone_controller ^
+    --hidden-import=src.main_window ^
+    --hidden-import=src.logger ^
+    --hidden-import=src.widgets ^
+    --hidden-import=src.tray_icon ^
+    --hidden-import=src.hotkey_manager ^
+    --hidden-import=src.workers ^
+    --hidden-import=src.ui_builder ^
+    --hidden-import=threading ^
+    --hidden-import=time ^
+    --hidden-import=os ^
+    --hidden-import=json ^
+    --collect-all PyQt5 ^
+    --collect-all keyboard ^
+    --collect-all comtypes ^
+    --collect-all pycaw ^
+    --clean ^
+    --noconfirm ^
+    micro_off.py
 
 if errorlevel 1 (
     echo.
@@ -43,6 +73,16 @@ echo   ✅ СБОРКА ЗАВЕРШЕНА
 echo ========================================
 echo.
 echo Исполняемый файл: dist\MicroOff.exe
+echo Размер: ~40-60 МБ
 echo.
+
+:: Проверка наличия файла
+if exist "dist\MicroOff.exe" (
+    echo ✅ Файл создан успешно!
+    echo.
+    echo Для запуска: dist\MicroOff.exe
+) else (
+    echo ⚠️ Файл не найден. Возможно ошибка сборки.
+)
 
 pause

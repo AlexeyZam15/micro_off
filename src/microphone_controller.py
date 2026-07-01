@@ -1,25 +1,31 @@
 """
 Модуль контроллера микрофона.
 
-Управляет устройствами записи через PowerShell и AudioDeviceCmdlets.
+Управляет устройствами записи через библиотеку pycaw (Windows Core Audio API).
+Обеспечивает быстрое и надежное управление микрофоном без PowerShell.
 """
 
-import subprocess
-import threading
-import json
 import os
+import json
 import time
-import base64
+import threading
 from datetime import datetime
-from src.logger import Logger
+from comtypes import CoInitialize, CoUninitialize, cast, POINTER
+from pycaw.pycaw import (
+    AudioUtilities,
+    IAudioEndpointVolume,
+    EDataFlow,
+    ERole,
+    IMMDeviceEnumerator,
+    IMMDevice
+)
 
-# Файл кэша
-CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'devices_cache.json')
+from src.logger import Logger
 
 
 class MicrophoneController:
     """
-    Контроллер для управления микрофоном через PowerShell.
+    Контроллер для управления микрофоном через pycaw.
     Позволяет получать список устройств, переключать их и управлять mute.
     """
 
@@ -27,328 +33,432 @@ class MicrophoneController:
         """
         Инициализация контроллера микрофона.
         """
-        self.process = None
         self.mute_status = False
         self.current_device = None
         self.devices = []
         self.selected_device_id = None
-        self.lock = threading.Lock()
-        self.is_initialized = False
-        self.init_error = None
-        self.devices_loaded = False
-        self.devices_cache = []
         self.active_device_id = None
-        self.powershell_process = None
+        self.active_device_name = None
+        self.devices_loaded = False
         self.device_list_lock = threading.Lock()
-        self.module_available = False
+        self._com_lock = threading.Lock()
+        self._com_initialized = False
+        self._default_device_cache = None
+        self._default_device_name_cache = None
 
-        print("Запуск контроллера")
+        print("Запуск контроллера микрофона (pycaw)")
 
-        # Проверяем наличие модуля синхронно
-        self._check_module_sync()
+        # Инициализируем COM в основном потоке
+        self._init_com()
 
-        # Запускаем долгоживущий PowerShell процесс
-        threading.Thread(target=self._init_powershell, daemon=True).start()
-
-    def _check_module_sync(self):
+    def _init_com(self):
         """
-        Синхронная проверка наличия модуля AudioDeviceCmdlets.
+        Инициализирует COM в текущем потоке.
         """
-        try:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command',
-                 'if (Get-Module -ListAvailable -Name AudioDeviceCmdlets) { Write-Output "true" } else { Write-Output "false" }'],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-
-            self.module_available = result.stdout.strip().lower() == 'true'
-
-            if self.module_available:
-                print("✅ Модуль AudioDeviceCmdlets найден")
-            else:
-                print(
-                    "⚠️ Модуль AudioDeviceCmdlets не найден, нужно установить: Install-Module AudioDeviceCmdlets -Force")
-        except Exception as e:
-            print(f"❌ Ошибка проверки модуля: {e}")
-            self.module_available = False
-
-    def _init_powershell(self):
-        """
-        Инициализирует долгоживущий процесс PowerShell.
-        """
-        try:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            self.powershell_process = subprocess.Popen(
-                ['powershell', '-NoProfile', '-Command',
-                 'Import-Module AudioDeviceCmdlets -ErrorAction SilentlyContinue -Force; while ($true) { $cmd = Read-Host; if ($cmd -eq "EXIT") { break }; Invoke-Expression $cmd }'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-
-            self.is_initialized = True
-            print("✅ PowerShell инициализирован")
-
-            # Запускаем поток чтения вывода (чтобы не блокировать)
-            threading.Thread(target=self._read_output, daemon=True).start()
-
-        except Exception as e:
-            self.init_error = str(e)
-            Logger.log_error("Ошибка инициализации PowerShell", e)
-            print(f"❌ Ошибка инициализации: {e}")
-
-    def _read_output(self):
-        """
-        Читает вывод PowerShell в фоне.
-        """
-        while self.powershell_process and self.powershell_process.poll() is None:
+        with self._com_lock:
             try:
-                line = self.powershell_process.stdout.readline()
-                if not line:
-                    break
-                if line.strip():
-                    print(f"PowerShell: {line.strip()}")
-            except:
-                break
+                CoInitialize()
+                self._com_initialized = True
+                print("✅ COM инициализирован")
+            except Exception as e:
+                if "already initialized" in str(e).lower():
+                    self._com_initialized = True
+                else:
+                    print(f"❌ Ошибка инициализации COM: {e}")
+                    Logger.log_error("Ошибка инициализации COM", e)
 
-    def _send_command_async(self, command):
+    def _ensure_com_for_thread(self):
         """
-        Отправляет команду в PowerShell асинхронно (мгновенно).
-        """
-        if not self.is_initialized or not self.powershell_process:
-            self._send_command_sync(command)
-            return
-
-        try:
-            with self.lock:
-                if self.powershell_process and self.powershell_process.stdin:
-                    self.powershell_process.stdin.write(command + "\n")
-                    self.powershell_process.stdin.flush()
-        except Exception as e:
-            Logger.log_error("Ошибка отправки команды", e)
-            self._send_command_sync(command)
-
-    def _send_command_sync(self, command):
-        """
-        Синхронное выполнение команды (запасной вариант).
+        Гарантирует, что COM инициализирован для текущего потока.
         """
         try:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            full_command = f'Import-Module AudioDeviceCmdlets -ErrorAction SilentlyContinue -Force; {command}'
-
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', full_command],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            CoInitialize()
+            return True
         except Exception as e:
-            Logger.log_error("Ошибка синхронного выполнения", e)
+            if "already initialized" in str(e).lower():
+                return True
+            return False
 
-    def get_active_device(self):
+    def _get_device_friendly_name(self, device):
         """
-        Получает ID активного устройства записи.
-        """
-        if not self.module_available:
-            return None
+        Получает дружественное имя устройства из IMMDevice или AudioDevice.
 
-        try:
-            command = 'Import-Module AudioDeviceCmdlets -ErrorAction SilentlyContinue -Force; (Get-AudioDevice -Recording).ID'
-
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', command],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            return None
-        except Exception as e:
-            Logger.log_error("Ошибка получения активного устройства", e)
-            return None
-
-    def load_from_cache(self):
-        """
-        Загружает устройства из кэша.
+        Args:
+            device: IMMDevice или AudioDevice объект
 
         Returns:
-            bool: True если кэш загружен, False если нет
+            str: Имя устройства
         """
         try:
-            if os.path.exists(CACHE_FILE):
-                with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    cached_devices = data.get('devices', [])
-                    if cached_devices:
-                        with self.device_list_lock:
-                            self.devices_cache = cached_devices
-                            self.devices = cached_devices
-                            self.devices_loaded = True
-                        print(f"✅ Загружен кэш: {len(self.devices_cache)} устройств")
-                        return True
-            return False
+            # Если это AudioDevice из pycaw
+            if hasattr(device, 'FriendlyName'):
+                return device.FriendlyName
+
+            # Если это IMMDevice - пробуем через PropertyStore
+            if hasattr(device, 'OpenPropertyStore'):
+                try:
+                    from comtypes import GUID
+                    from pycaw.pycaw import PROPERTYKEY
+                    store = device.OpenPropertyStore(0)
+
+                    pkey = PROPERTYKEY()
+                    pkey.fmtid = GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}")
+                    pkey.pid = 14
+
+                    prop_value = store.GetValue(pkey)
+                    if prop_value:
+                        if hasattr(prop_value, 'value'):
+                            return str(prop_value.value)
+                        return str(prop_value)
+                except Exception as e:
+                    pass
+
+            # Пробуем через GetId
+            if hasattr(device, 'GetId'):
+                try:
+                    device_id = device.GetId()
+                    import re
+                    match = re.search(r'#{([^}]+)}', device_id)
+                    if match:
+                        return match.group(1)[:30]
+                    return device_id.split('\\')[-1][:30]
+                except:
+                    pass
+
+            return "Unknown Device"
+
         except Exception as e:
-            Logger.log_error("Ошибка загрузки кэша", e)
-            return False
+            return "Unknown Device"
 
-    def get_devices_from_powershell(self):
+    def _get_device_id(self, device):
         """
-        Получает список устройств записи через PowerShell с Base64 для русских букв.
-        """
-        if not self.module_available:
-            print("⚠️ Модуль AudioDeviceCmdlets не установлен")
-            return []
+        Получает ID устройства из IMMDevice или AudioDevice.
 
+        Args:
+            device: IMMDevice или AudioDevice объект
+
+        Returns:
+            str: ID устройства
+        """
         try:
-            # Используем Base64 для сохранения русских букв
-            command = '''
-            Import-Module AudioDeviceCmdlets -ErrorAction SilentlyContinue -Force;
-            $devices = Get-AudioDevice -List | Where-Object {$_.Type -eq "Recording"};
-            $result = @();
-            foreach ($dev in $devices) {
-                $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($dev.Name);
-                $nameBase64 = [Convert]::ToBase64String($nameBytes);
-                $idBytes = [System.Text.Encoding]::UTF8.GetBytes($dev.ID);
-                $idBase64 = [Convert]::ToBase64String($idBytes);
-                $result += "$nameBase64|||$idBase64";
-            }
-            Write-Output ($result -join "`n");
-            '''
+            if hasattr(device, 'id'):
+                return device.id
 
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            if hasattr(device, 'GetId'):
+                return device.GetId()
 
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', command],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            return None
+        except Exception as e:
+            return None
 
-            devices = []
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
+    def _get_device_volume_interface_from_device(self, device):
+        """
+        Получает интерфейс громкости из IMMDevice или AudioDevice.
 
-                for line in lines:
-                    if not line.strip():
-                        continue
+        Args:
+            device: IMMDevice или AudioDevice объект
 
-                    if '|||' in line:
-                        parts = line.split('|||', 1)
-                        if len(parts) == 2:
-                            name_base64 = parts[0].strip()
-                            id_base64 = parts[1].strip()
-                            if name_base64 and id_base64:
-                                try:
-                                    name_bytes = base64.b64decode(name_base64)
-                                    name = name_bytes.decode('utf-8')
+        Returns:
+            IAudioEndpointVolume или None
+        """
+        try:
+            if hasattr(device, 'EndpointVolume') and device.EndpointVolume:
+                return device.EndpointVolume
 
-                                    id_bytes = base64.b64decode(id_base64)
-                                    device_id = id_bytes.decode('utf-8')
+            if hasattr(device, 'Activate'):
+                try:
+                    interface = device.Activate(
+                        IAudioEndpointVolume._iid_,
+                        0,
+                        None
+                    )
+                    return cast(interface, POINTER(IAudioEndpointVolume))
+                except Exception as e:
+                    return None
 
-                                    devices.append((name, device_id))
-                                except Exception as e:
-                                    continue
+            return None
+        except Exception as e:
+            return None
 
-            if devices:
-                print(f"✅ Найдено устройств: {len(devices)}")
-                return devices
+    def get_all_devices(self):
+        """
+        Получает все активные устройства записи через pycaw.
 
-            print("⚠️ Устройства не найдены")
+        Returns:
+            list: Список объектов устройств (AudioDevice или IMMDevice)
+        """
+        try:
+            if not self._ensure_com_for_thread():
+                return []
+
+            # Пробуем получить устройства через GetAllDevices
+            try:
+                devices = AudioUtilities.GetAllDevices(
+                    data_flow=EDataFlow.eCapture.value,
+                    device_state=1
+                )
+                if devices and len(devices) > 0:
+                    return devices
+            except Exception as e:
+                pass
+
+            # Пробуем через DeviceEnumerator
+            try:
+                device_enumerator = AudioUtilities.GetDeviceEnumerator()
+                collection = device_enumerator.EnumAudioEndpoints(
+                    EDataFlow.eCapture.value,
+                    0x00000001
+                )
+                count = collection.GetCount()
+
+                if count > 0:
+                    devices = []
+                    for i in range(count):
+                        device = collection.Item(i)
+                        devices.append(device)
+                    return devices
+            except Exception as e:
+                pass
+
             return []
+
         except Exception as e:
             Logger.log_error("Ошибка получения устройств", e)
-            print(f"❌ Ошибка получения устройств: {e}")
             return []
 
-    def save_cache(self):
+    def _get_default_microphone_device(self):
         """
-        Сохраняет кэш устройств в UTF-8.
+        Получает устройство микрофона по умолчанию (с кэшированием).
+
+        Returns:
+            IMMDevice или AudioDevice объект, или None
         """
         try:
-            with self.device_list_lock:
-                data = {
-                    'devices': self.devices_cache,
-                    'timestamp': time.time()
-                }
-            with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"✅ Кэш сохранен: {len(self.devices_cache)} устройств")
+            if not self._ensure_com_for_thread():
+                return None
+
+            # Пробуем через GetMicrophone (AudioDevice)
+            try:
+                device = AudioUtilities.GetMicrophone()
+                if device:
+                    return device
+            except Exception as e:
+                pass
+
+            # Пробуем через DeviceEnumerator
+            try:
+                device_enumerator = AudioUtilities.GetDeviceEnumerator()
+                device = device_enumerator.GetDefaultAudioEndpoint(
+                    EDataFlow.eCapture.value,
+                    ERole.eMultimedia.value
+                )
+                if device:
+                    return device
+            except Exception as e:
+                pass
+
+            return None
+
         except Exception as e:
-            Logger.log_error("Ошибка сохранения кэша", e)
+            Logger.log_error("Ошибка получения дефолтного микрофона", e)
+            return None
+
+    def get_active_microphone_info(self):
+        """
+        Получает информацию об активном микрофоне по умолчанию.
+        Использует кэширование для предотвращения спама.
+
+        Returns:
+            tuple: (имя_устройства, id_устройства) или None
+        """
+        try:
+            # Проверяем кэш
+            if self._default_device_cache is not None:
+                return (self._default_device_name_cache, self._default_device_cache)
+
+            device = self._get_default_microphone_device()
+            if not device:
+                # Если нет дефолтного, берем первое устройство
+                devices = self.get_all_devices()
+                if devices:
+                    device = devices[0]
+                else:
+                    return None
+
+            name = self._get_device_friendly_name(device)
+            device_id = self._get_device_id(device)
+
+            if name and device_id:
+                # Сохраняем в кэш
+                self._default_device_cache = device_id
+                self._default_device_name_cache = name
+                return (name, device_id)
+
+            return None
+
+        except Exception as e:
+            Logger.log_error("Ошибка получения активного микрофона", e)
+            return None
+
+    def clear_default_device_cache(self):
+        """
+        Очищает кэш дефолтного устройства.
+        Вызывается при обновлении устройств.
+        """
+        self._default_device_cache = None
+        self._default_device_name_cache = None
+
+    def get_device_by_id(self, device_id):
+        """
+        Находит устройство по ID.
+
+        Args:
+            device_id: ID устройства
+
+        Returns:
+            Устройство (AudioDevice или IMMDevice) или None
+        """
+        try:
+            if not self._ensure_com_for_thread():
+                return None
+
+            devices = self.get_all_devices()
+            for device in devices:
+                dev_id = self._get_device_id(device)
+                if dev_id == device_id:
+                    return device
+            return None
+        except Exception as e:
+            Logger.log_error("Ошибка поиска устройства по ID", e)
+            return None
+
+    def get_device_volume_interface(self, device_id=None):
+        """
+        Получает интерфейс IAudioEndpointVolume для устройства.
+
+        Args:
+            device_id: ID устройства (если None, используется активное)
+
+        Returns:
+            IAudioEndpointVolume или None
+        """
+        try:
+            if not self._ensure_com_for_thread():
+                return None
+
+            # Если device_id не указан, используем сохраненный активный
+            if device_id is None:
+                device_id = self.active_device_id
+
+            if device_id:
+                device = self.get_device_by_id(device_id)
+            else:
+                # Пытаемся получить дефолтное устройство
+                device = self._get_default_microphone_device()
+                if not device:
+                    # Берем первое устройство из списка
+                    devices = self.get_all_devices()
+                    if devices:
+                        device = devices[0]
+                    else:
+                        return None
+
+            if not device:
+                return None
+
+            return self._get_device_volume_interface_from_device(device)
+
+        except Exception as e:
+            Logger.log_error("Ошибка получения интерфейса громкости", e)
+            return None
 
     def get_devices(self, force_refresh=False):
         """
         Получает список всех устройств записи.
 
         Args:
-            force_refresh: Принудительное обновление (игнорирует кэш)
+            force_refresh: Принудительное обновление
+
+        Returns:
+            list: Список кортежей (имя_устройства, id_устройства)
         """
-        with self.device_list_lock:
-            if not force_refresh and self.devices_loaded and self.devices_cache:
-                return self.devices_cache
+        # При принудительном обновлении очищаем кэш дефолтного устройства
+        if force_refresh:
+            self.clear_default_device_cache()
 
-        if not self.module_available:
-            print("⚠️ Модуль не доступен, используем кэш")
-            return self.devices_cache if self.devices_cache else []
+        devices = self.get_devices_from_pycaw()
 
-        devices = self.get_devices_from_powershell()
         if devices:
             with self.device_list_lock:
                 self.devices = devices
-                self.devices_cache = devices
                 self.devices_loaded = True
-            self.save_cache()
+
+            # Получаем активный микрофон только при первом запуске или принудительном обновлении
+            if force_refresh or not self.active_device_id:
+                active_info = self.get_active_microphone_info()
+                if active_info:
+                    active_name, active_id = active_info
+                    self.active_device_id = active_id
+                    self.active_device_name = active_name
+                    print(f"✅ Активный микрофон: {active_name}")
+
             return devices
 
-        if self.devices_cache:
-            print("⚠️ Используем сохраненный кэш")
-            return self.devices_cache
-
+        print("❌ Устройства не найдены")
         return []
+
+    def get_devices_from_pycaw(self):
+        """
+        Получает список устройств записи через pycaw.
+
+        Returns:
+            list: Список кортежей (имя_устройства, id_устройства)
+        """
+        try:
+            devices = self.get_all_devices()
+            result = []
+
+            if not devices:
+                return []
+
+            for device in devices:
+                name = self._get_device_friendly_name(device)
+                device_id = self._get_device_id(device)
+
+                if name and device_id:
+                    result.append((name, device_id))
+                elif name:
+                    result.append((name, str(device)))
+
+            if result:
+                print(f"✅ Найдено устройств: {len(result)}")
+                for i, (name, device_id) in enumerate(result, 1):
+                    print(f"  {i}. {name}")
+                return result
+
+            return []
+
+        except Exception as e:
+            Logger.log_error("Ошибка получения устройств из pycaw", e)
+            return []
 
     def set_device_fast(self, device_id):
         """
-        Мгновенное переключение на указанное устройство.
+        Устанавливает активное устройство.
+
+        Args:
+            device_id: ID устройства
+
+        Returns:
+            bool: True если успешно
         """
         try:
+            self.active_device_id = device_id
             with self.device_list_lock:
                 self.selected_device_id = device_id
                 self.current_device = device_id
 
-            command = f'Set-AudioDevice -ID "{device_id}"'
-            self._send_command_async(command)
-
+            print(f"✅ Выбрано устройство: {device_id}")
             return True
         except Exception as e:
             Logger.log_error("Ошибка установки устройства", e)
@@ -356,52 +466,95 @@ class MicrophoneController:
 
     def toggle(self):
         """
-        Мгновенное переключение состояния mute.
+        Переключает состояние mute.
+
+        Returns:
+            bool: Новый статус (True - выключен, False - включен)
         """
-        self.mute_status = not self.mute_status
-        command = f'$dev = Get-AudioDevice -Recording; $dev.Device.AudioEndpointVolume.Mute = ${str(self.mute_status).lower()}'
-        self._send_command_async(command)
-        return self.mute_status
+        try:
+            volume = self.get_device_volume_interface()
+            if volume:
+                current = volume.GetMute()
+                new_status = not current
+                volume.SetMute(new_status, None)
+                self.mute_status = new_status
+                print(f"🔄 Микрофон переключен: {'ВЫКЛЮЧЕН' if new_status else 'ВКЛЮЧЕН'}")
+                return new_status
+            else:
+                print("❌ Не удалось получить интерфейс громкости")
+                return self.mute_status
+        except Exception as e:
+            Logger.log_error("Ошибка переключения", e)
+            return self.mute_status
 
     def mute(self):
         """
-        Мгновенное выключение микрофона.
+        Выключает микрофон.
+
+        Returns:
+            bool: True если успешно
         """
-        self.mute_status = True
-        command = '$dev = Get-AudioDevice -Recording; $dev.Device.AudioEndpointVolume.Mute = $true'
-        self._send_command_async(command)
-        return True
+        try:
+            volume = self.get_device_volume_interface()
+            if volume:
+                volume.SetMute(True, None)
+                self.mute_status = True
+                print("🔇 Микрофон выключен")
+                return True
+            else:
+                print("❌ Не удалось получить интерфейс громкости")
+                return False
+        except Exception as e:
+            Logger.log_error("Ошибка выключения", e)
+            return False
 
     def unmute(self):
         """
-        Мгновенное включение микрофона.
+        Включает микрофон.
+
+        Returns:
+            bool: True если успешно
         """
-        self.mute_status = False
-        command = '$dev = Get-AudioDevice -Recording; $dev.Device.AudioEndpointVolume.Mute = $false'
-        self._send_command_async(command)
-        return False
+        try:
+            volume = self.get_device_volume_interface()
+            if volume:
+                volume.SetMute(False, None)
+                self.mute_status = False
+                print("🎤 Микрофон включен")
+                return True
+            else:
+                print("❌ Не удалось получить интерфейс громкости")
+                return False
+        except Exception as e:
+            Logger.log_error("Ошибка включения", e)
+            return False
 
     def unmute_all_devices(self):
         """
-        Быстрое включение всех устройств записи (сброс).
+        Включает все устройства записи (сброс).
+
+        Returns:
+            bool: True если хотя бы одно устройство включено
         """
         try:
             devices = self.get_devices()
             if not devices:
                 return False
 
+            success_count = 0
             for name, device_id in devices:
                 try:
-                    self.set_device_fast(device_id)
-                    self.unmute()
-                except:
+                    volume = self.get_device_volume_interface(device_id)
+                    if volume:
+                        volume.SetMute(False, None)
+                        success_count += 1
+                        print(f"  ✅ Включен: {name}")
+                except Exception as e:
+                    print(f"  ❌ Ошибка при включении {name}: {e}")
                     continue
 
-            if self.active_device_id:
-                self.set_device_fast(self.active_device_id)
-
-            print("✅ Все устройства включены")
-            return True
+            print(f"Включено устройств: {success_count} из {len(devices)}")
+            return success_count > 0
         except Exception as e:
             Logger.log_error("Ошибка включения всех устройств", e)
             return False
@@ -409,28 +562,15 @@ class MicrophoneController:
     def get_mute_status(self):
         """
         Получает текущий статус MUTE.
+
+        Returns:
+            bool: True если выключен, False если включен
         """
-        if not self.module_available:
-            return self.mute_status
-
         try:
-            command = '(Get-AudioDevice -Recording).Device.AudioEndpointVolume.Mute'
-
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command',
-                 f'Import-Module AudioDeviceCmdlets -ErrorAction SilentlyContinue -Force; {command}'],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                self.mute_status = result.stdout.strip().lower() == "true"
+            volume = self.get_device_volume_interface()
+            if volume:
+                self.mute_status = volume.GetMute()
+                return self.mute_status
             return self.mute_status
         except Exception as e:
             Logger.log_error("Ошибка получения статуса", e)
@@ -439,23 +579,55 @@ class MicrophoneController:
     def update_status_display(self):
         """
         Возвращает текущий статус для отображения в интерфейсе.
-        НЕ ОБРАЩАЕТСЯ К СИСТЕМЕ!
+
+        Returns:
+            bool: Статус mute
         """
         return self.mute_status
+
+    def set_volume(self, volume_level):
+        """
+        Устанавливает громкость устройства.
+
+        Args:
+            volume_level: Уровень громкости (0-100)
+
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            volume = self.get_device_volume_interface()
+            if volume:
+                scalar = max(0, min(100, volume_level)) / 100.0
+                volume.SetMasterVolumeLevelScalar(scalar, None)
+                print(f"🔊 Громкость установлена на {volume_level}%")
+                return True
+            return False
+        except Exception as e:
+            Logger.log_error("Ошибка установки громкости", e)
+            return False
+
+    def get_volume(self):
+        """
+        Получает текущую громкость устройства.
+
+        Returns:
+            float: Громкость (0-100) или None
+        """
+        try:
+            volume = self.get_device_volume_interface()
+            if volume:
+                return volume.GetMasterVolumeLevelScalar() * 100
+            return None
+        except Exception as e:
+            Logger.log_error("Ошибка получения громкости", e)
+            return None
 
     def close(self):
         """
         Закрывает ресурсы.
         """
         try:
-            if self.powershell_process:
-                try:
-                    self.powershell_process.stdin.write("EXIT\n")
-                    self.powershell_process.stdin.flush()
-                except:
-                    pass
-                self.powershell_process.terminate()
-                self.powershell_process = None
             print("✅ Контроллер закрыт")
         except Exception as e:
             Logger.log_error("Ошибка закрытия", e)
