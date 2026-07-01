@@ -1,5 +1,6 @@
 """
 Модуль главного окна приложения MicroOff.
+
 Содержит основное окно с элементами управления микрофоном.
 """
 
@@ -42,6 +43,7 @@ class MicrophoneGUI(QMainWindow):
         self.device_loader = None
         self.is_loading = False
         self.ui_initialized = False
+        self._updating_combo = False
 
         # Подключаем сигнал к слоту
         self.update_devices_ui_signal.connect(self.update_devices_ui)
@@ -77,31 +79,133 @@ class MicrophoneGUI(QMainWindow):
 
         self.start_status_updater()
 
-        # Асинхронная загрузка кэша с задержкой для получения active_device_id
-        QTimer.singleShot(300, self.load_cache_async)
+        # Сначала загружаем из кэша (мгновенно)
+        cache_loaded = self.controller.load_from_cache()
 
-        # Загружаем устройства с задержкой чтобы активное устройство успело определиться
-        QTimer.singleShot(500, self.load_devices_async)
+        if cache_loaded:
+            # Показываем кэш
+            selected_index = 0
+            if self.controller.active_device_id:
+                for i, (name, device_id) in enumerate(self.controller.devices_cache):
+                    if device_id == self.controller.active_device_id:
+                        selected_index = i
+                        self.controller.selected_device_id = device_id
+                        break
+
+            self._update_combo_ui(self.controller.devices_cache, selected_index)
+            self.controller.get_mute_status()
+            self.update_status_display()
+
+            # Фоновое обновление через 1 секунду
+            QTimer.singleShot(1000, self.refresh_devices_background)
+        else:
+            # Показываем "Загрузка..."
+            self.device_combo.clear()
+            self.device_combo.addItem("⏳ Загрузка...")
+            self.device_combo.setEnabled(False)
+            self.refresh_btn.setEnabled(False)
+            self.reset_btn.setEnabled(False)
+            self.mute_btn.setEnabled(False)
+            self.unmute_btn.setEnabled(False)
+            self.toggle_btn.setEnabled(False)
+
+            # Загружаем в фоне
+            QTimer.singleShot(100, self.load_devices_async)
+
+    def refresh_devices_background(self):
+        """
+        Фоновое обновление списка устройств без блокировки UI.
+        """
+        if self.is_loading:
+            return
+
+        def refresh_task():
+            devices = self.controller.get_devices(force_refresh=True)
+            if devices:
+                selected_index = 0
+                if self.controller.active_device_id:
+                    for i, (name, device_id) in enumerate(devices):
+                        if device_id == self.controller.active_device_id:
+                            selected_index = i
+                            self.controller.selected_device_id = device_id
+                            break
+
+                # Обновляем UI в главном потоке
+                self.update_devices_ui_signal.emit(devices)
+                print("✅ Фоновое обновление устройств выполнено")
+
+        threading.Thread(target=refresh_task, daemon=True).start()
+
+    def _update_combo_ui(self, devices, selected_index):
+        """
+        Внутренний метод для обновления UI комбобокса без генерации сигналов.
+
+        Args:
+            devices: Список устройств
+            selected_index: Индекс для выбора
+        """
+        self._updating_combo = True
+        try:
+            self.device_combo.clear()
+
+            if devices:
+                for i, (name, device_id) in enumerate(devices, 1):
+                    if isinstance(name, bytes):
+                        try:
+                            name = name.decode('utf-8')
+                        except UnicodeDecodeError:
+                            try:
+                                name = name.decode('cp866')
+                            except UnicodeDecodeError:
+                                name = name.decode('cp1251')
+                    display_name = name
+                    if len(display_name) > 50:
+                        display_name = display_name[:47] + "..."
+                    self.device_combo.addItem(f"{i}. {display_name}", device_id)
+
+                if selected_index < self.device_combo.count():
+                    self.device_combo.setCurrentIndex(selected_index)
+                else:
+                    self.device_combo.setCurrentIndex(0)
+
+                self.device_combo.setEnabled(True)
+                self.refresh_btn.setEnabled(True)
+                self.mute_btn.setEnabled(True)
+                self.unmute_btn.setEnabled(True)
+                self.toggle_btn.setEnabled(True)
+                self.reset_btn.setEnabled(True)
+                self.ui_initialized = True
+            else:
+                self.device_combo.addItem("❌ Устройства не найдены")
+                self.device_combo.setEnabled(True)
+                self.refresh_btn.setEnabled(True)
+                self.reset_btn.setEnabled(False)
+                self.mute_btn.setEnabled(False)
+                self.unmute_btn.setEnabled(False)
+                self.toggle_btn.setEnabled(False)
+                self.show_loading_status("❌ Устройства не найдены", "#ef4444")
+        finally:
+            self._updating_combo = False
 
     def load_devices_async(self):
         """
-        Асинхронная загрузка устройств.
-        Принудительно обновляет список, сбрасывая кэш.
+        Асинхронная загрузка устройств с очисткой кэша.
+        Вызывается при принудительном обновлении.
         """
         if self.is_loading:
             return
 
         self.is_loading = True
-        self.ui_initialized = False  # Сбрасываем флаг для принудительного обновления
+        self.ui_initialized = False
         self.device_combo.setEnabled(False)
         self.refresh_btn.setEnabled(False)
+        self.reset_btn.setEnabled(False)
         self.device_combo.clear()
         self.device_combo.addItem("⏳ Загрузка...")
         self.mute_btn.setEnabled(False)
         self.unmute_btn.setEnabled(False)
         self.toggle_btn.setEnabled(False)
 
-        # Принудительно очищаем кэш в контроллере, чтобы получить свежий список
         self.controller.devices_loaded = False
         self.controller.devices_cache = []
         self.controller.devices = []
@@ -118,13 +222,31 @@ class MicrophoneGUI(QMainWindow):
             devices: Список устройств
         """
         if devices:
-            self.update_devices_ui(devices)
+            self.controller.devices_cache = devices
+            self.controller.devices = devices
+            self.controller.devices_loaded = True
+            self.controller.save_cache()
+
+            selected_index = 0
+            if self.controller.active_device_id:
+                for i, (name, device_id) in enumerate(devices):
+                    if device_id == self.controller.active_device_id:
+                        selected_index = i
+                        self.controller.selected_device_id = device_id
+                        break
+
+            self._update_combo_ui(devices, selected_index)
+            self.controller.get_mute_status()
+            self.update_status_display()
         else:
-            # Если устройств нет, показываем сообщение
             self.device_combo.clear()
             self.device_combo.addItem("❌ Устройства не найдены")
             self.device_combo.setEnabled(True)
             self.refresh_btn.setEnabled(True)
+            self.reset_btn.setEnabled(False)
+            self.mute_btn.setEnabled(False)
+            self.unmute_btn.setEnabled(False)
+            self.toggle_btn.setEnabled(False)
             self.show_loading_status("❌ Устройства не найдены", "#ef4444")
             self.show_notification("Ошибка", "Устройства записи не найдены")
 
@@ -140,40 +262,18 @@ class MicrophoneGUI(QMainWindow):
         Args:
             devices: Список устройств
         """
-        self.device_combo.clear()
+        if self._updating_combo:
+            return
 
-        if devices:
-            for i, (name, id) in enumerate(devices, 1):
-                display_name = name
-                if len(display_name) > 50:
-                    display_name = display_name[:47] + "..."
-                self.device_combo.addItem(f"{i}. {display_name}", id)
+        selected_index = 0
+        if self.controller.active_device_id:
+            for i, (name, device_id) in enumerate(devices):
+                if device_id == self.controller.active_device_id:
+                    selected_index = i
+                    self.controller.selected_device_id = device_id
+                    break
 
-            selected_index = 0
-            if self.controller.active_device_id:
-                found = False
-                for i, (name, id) in enumerate(devices):
-                    if id == self.controller.active_device_id:
-                        selected_index = i
-                        self.controller.selected_device_id = id
-                        found = True
-                        break
-
-            self.device_combo.setCurrentIndex(selected_index)
-            self.device_combo.setEnabled(True)
-            self.refresh_btn.setEnabled(True)
-            self.mute_btn.setEnabled(True)
-            self.unmute_btn.setEnabled(True)
-            self.toggle_btn.setEnabled(True)
-
-            self.ui_initialized = True
-            self.update_status_display()
-            self.show_notification("Устройства", f"Загружено {len(devices)} микрофонов")
-        else:
-            self.device_combo.addItem("⏳ Загрузка...")
-            self.device_combo.setEnabled(False)
-            self.refresh_btn.setEnabled(True)  # Включаем кнопку обновления даже если устройств нет
-            self.show_loading_status("⏳ Загрузка устройств...", "#a78bfa")
+        self._update_combo_ui(devices, selected_index)
 
     def init_ui(self):
         """
@@ -181,8 +281,8 @@ class MicrophoneGUI(QMainWindow):
         Использует UIBuilder для создания всех элементов.
         """
         self.setWindowTitle("MicroOff")
-        self.setMinimumSize(540, 660)
-        self.resize(580, 690)
+        self.setMinimumSize(540, 740)
+        self.resize(580, 770)
 
         self.setWindowIcon(self.create_microphone_icon())
 
@@ -229,11 +329,43 @@ class MicrophoneGUI(QMainWindow):
         self.tray_btn.clicked.connect(self.hide_to_tray)
         content_layout.addWidget(self.tray_btn)
 
+        # Добавляем кнопку сброса после кнопки сворачивания
+        self.reset_btn = GlassButton("🔄 Включить все устройства (сброс)", "#f59e0b")
+        self.reset_btn.clicked.connect(self.reset_all_devices)
+        self.reset_btn.setEnabled(False)
+        content_layout.addWidget(self.reset_btn)
+
         # Добавляем растяжение
         content_layout.addStretch()
 
         main_layout.addWidget(content_widget)
         self.setCentralWidget(central_widget)
+
+    def reset_all_devices(self):
+        """
+        Включает все устройства записи.
+        """
+        try:
+            self.reset_btn.setEnabled(False)
+            self.reset_btn.setText("⏳ Включение...")
+
+            def reset_task():
+                success = self.controller.unmute_all_devices()
+                self.reset_btn.setEnabled(True)
+                self.reset_btn.setText("🔄 Включить все устройства (сброс)")
+                if success:
+                    self.show_notification("Сброс", "Все устройства включены")
+                    self.controller.get_mute_status()
+                    self.update_status_display()
+                else:
+                    self.show_notification("Ошибка", "Не удалось включить все устройства")
+
+            threading.Thread(target=reset_task, daemon=True).start()
+        except Exception as e:
+            Logger.log_error("Ошибка сброса устройств", e)
+            self.reset_btn.setEnabled(True)
+            self.reset_btn.setText("🔄 Включить все устройства (сброс)")
+            self.show_notification("Ошибка", "Не удалось выполнить сброс")
 
     def toggle_maximize(self):
         """
@@ -268,43 +400,6 @@ class MicrophoneGUI(QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
-    def load_cache_async(self):
-        """
-        Асинхронная загрузка кэша устройств из файла.
-        Запускается в отдельном потоке, чтобы не блокировать интерфейс.
-        Проверяет, определен ли active_device_id перед обновлением UI.
-        """
-
-        def load_cache_task():
-            try:
-                # Ждем, пока определится active_device_id
-                timeout = 2
-                start_time = time.time()
-                while not self.controller.active_device_id and time.time() - start_time < timeout:
-                    time.sleep(0.1)
-
-                cache_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                          'devices_cache.json')
-                if os.path.exists(cache_file):
-                    with open(cache_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        devices = data.get('devices', [])
-                        if devices:
-                            self.controller.devices_cache = devices
-                            self.controller.devices = devices
-                            self.controller.devices_loaded = True
-                            # Обновляем UI через сигнал с уже определенным active_device_id
-                            self.update_devices_ui_signal.emit(devices)
-                        else:
-                            print("⚠️ Кэш пуст, будет выполнена полная загрузка")
-                else:
-                    print("ℹ️ Файл кэша не найден, будет выполнена полная загрузка")
-            except Exception as e:
-                Logger.log_error("Ошибка асинхронной загрузки кэша", e)
-                print(f"❌ Ошибка загрузки кэша: {e}")
-
-        threading.Thread(target=load_cache_task, daemon=True).start()
-
     def on_device_changed(self, index):
         """
         Обработка изменения выбранного устройства.
@@ -312,13 +407,19 @@ class MicrophoneGUI(QMainWindow):
         Args:
             index: Индекс в комбобоксе
         """
-        if index >= 0 and self.device_combo.isEnabled():
+        if self._updating_combo or not self.device_combo.isEnabled():
+            return
+
+        if index >= 0:
             device_id = self.device_combo.itemData(index)
             if device_id:
                 self.device_combo.setEnabled(False)
                 success = self.controller.set_device_fast(device_id)
                 self.device_combo.setEnabled(True)
                 if success:
+                    self.controller.active_device_id = device_id
+                    self.controller.selected_device_id = device_id
+                    self.controller.get_mute_status()
                     self.update_status_display()
                     current_text = self.device_combo.currentText()
                     self.show_notification("Микрофон", f"Выбран: {current_text}")
@@ -366,53 +467,10 @@ class MicrophoneGUI(QMainWindow):
     def on_status_updated(self, status):
         """
         Обработка обновления статуса.
-
-        Args:
-            status: Новый статус mute
         """
         self.controller.mute_status = status
         if self.device_combo.isEnabled():
             self.update_status_display()
-
-    def update_status_display(self):
-        """
-        Обновляет отображение статуса микрофона.
-        """
-        try:
-            if self.controller.mute_status:
-                self.status_label.setText("🔇 ВЫКЛЮЧЕН")
-                self.status_label.setStyleSheet("""
-                    font-size: 22px; 
-                    font-weight: 700; 
-                    color: #ef4444;
-                    background: transparent;
-                """)
-                self.status_indicator.setStyleSheet("""
-                    QLabel {
-                        border-radius: 10px;
-                        background-color: #ef4444;
-                        border: 2px solid #ef4444;
-                    }
-                """)
-                self.tray_icon.setToolTip("Микрофон выключен")
-            else:
-                self.status_label.setText("🎤 ВКЛЮЧЕН")
-                self.status_label.setStyleSheet("""
-                    font-size: 22px; 
-                    font-weight: 700; 
-                    color: #22c55e;
-                    background: transparent;
-                """)
-                self.status_indicator.setStyleSheet("""
-                    QLabel {
-                        border-radius: 10px;
-                        background-color: #22c55e;
-                        border: 2px solid #22c55e;
-                    }
-                """)
-                self.tray_icon.setToolTip("Микрофон включен")
-        except Exception as e:
-            Logger.log_error("Ошибка обновления статуса", e)
 
     def toggle_microphone(self):
         """
@@ -447,6 +505,47 @@ class MicrophoneGUI(QMainWindow):
         except Exception as e:
             Logger.log_error("Ошибка включения", e)
 
+    def update_status_display(self):
+        """
+        Обновляет отображение статуса микрофона.
+        """
+        try:
+            status = self.controller.update_status_display()
+            if status:
+                self.status_label.setText("🔇 ВЫКЛЮЧЕН")
+                self.status_label.setStyleSheet("""
+                    font-size: 22px; 
+                    font-weight: 700; 
+                    color: #ef4444;
+                    background: transparent;
+                """)
+                self.status_indicator.setStyleSheet("""
+                    QLabel {
+                        border-radius: 10px;
+                        background-color: #ef4444;
+                        border: 2px solid #ef4444;
+                    }
+                """)
+                self.tray_icon.setToolTip("Микрофон выключен")
+            else:
+                self.status_label.setText("🎤 ВКЛЮЧЕН")
+                self.status_label.setStyleSheet("""
+                    font-size: 22px; 
+                    font-weight: 700; 
+                    color: #22c55e;
+                    background: transparent;
+                """)
+                self.status_indicator.setStyleSheet("""
+                    QLabel {
+                        border-radius: 10px;
+                        background-color: #22c55e;
+                        border: 2px solid #22c55e;
+                    }
+                """)
+                self.tray_icon.setToolTip("Микрофон включен")
+        except Exception as e:
+            Logger.log_error("Ошибка обновления статуса", e)
+
     def hide_to_tray(self):
         """
         Скрывает окно в системный трей.
@@ -480,9 +579,6 @@ class MicrophoneGUI(QMainWindow):
     def mousePressEvent(self, event):
         """
         Обработка нажатия мыши для перетаскивания окна.
-
-        Args:
-            event: Событие мыши
         """
         if event.button() == Qt.LeftButton:
             self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
@@ -491,9 +587,6 @@ class MicrophoneGUI(QMainWindow):
     def mouseMoveEvent(self, event):
         """
         Обработка движения мыши для перетаскивания окна.
-
-        Args:
-            event: Событие мыши
         """
         if event.buttons() == Qt.LeftButton and hasattr(self, 'drag_position'):
             self.move(event.globalPos() - self.drag_position)
@@ -501,11 +594,7 @@ class MicrophoneGUI(QMainWindow):
 
     def keyPressEvent(self, event):
         """
-        Перехват клавиш F2-F6, чтобы не дублировать горячие клавиши.
-        Полностью блокируем все события для этих клавиш в приложении.
-
-        Args:
-            event: Событие клавиатуры
+        Перехват клавиш F2-F6.
         """
         if event.key() in (Qt.Key_F2, Qt.Key_F3, Qt.Key_F4, Qt.Key_F5, Qt.Key_F6):
             event.accept()
@@ -515,10 +604,6 @@ class MicrophoneGUI(QMainWindow):
     def keyReleaseEvent(self, event):
         """
         Перехват отпускания клавиш F2-F6.
-        Полностью блокируем все события для этих клавиш в приложении.
-
-        Args:
-            event: Событие клавиатуры
         """
         if event.key() in (Qt.Key_F2, Qt.Key_F3, Qt.Key_F4, Qt.Key_F5, Qt.Key_F6):
             event.accept()
@@ -528,30 +613,22 @@ class MicrophoneGUI(QMainWindow):
     def closeEvent(self, event):
         """
         Обработка закрытия окна.
-        Полностью завершает приложение.
-
-        Args:
-            event: Событие закрытия
         """
         print("Закрытие программы")
 
-        # Останавливаем рабочий поток
         if hasattr(self, 'worker') and self.worker:
             self.worker.stop()
             self.worker.wait()
             self.worker = None
 
-        # Останавливаем загрузчик устройств
         if hasattr(self, 'device_loader') and self.device_loader:
             self.device_loader.quit()
             self.device_loader.wait()
             self.device_loader = None
 
-        # Закрываем контроллер
         if hasattr(self, 'controller'):
             self.controller.close()
 
-        # Отключаем горячие клавиши
         if hasattr(self, 'hotkey_manager'):
             self.hotkey_manager.unregister_hotkeys()
 
