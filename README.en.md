@@ -35,13 +35,19 @@ Thank you for your support! ❤️
 
 ## Features
 
-🔇 **Quick mute/unmute** — one click or hotkey to control your microphone  
-🎤 **Device switching** — switch between multiple recording devices on the fly  
-⌨️ **Global hotkeys** — control microphone from any application  
-🔄 **Auto-detection** — automatically detects the currently active microphone  
-💾 **Device caching** — fast loading with cached device list  
-📱 **Adaptive interface** — scales properly on different screen sizes  
+🔇 **Quick mute/unmute** — one click or hotkey to control your microphone
+
+🎤 **Device switching** — switch between multiple recording devices on the fly
+
+⌨️ **Global hotkeys** — control microphone from any application
+
+🔄 **Auto-detection** — automatically detects the currently active microphone
+
+📱 **Adaptive interface** — scales properly on different screen sizes
+
 🖥️ **System tray** — runs minimized in the system tray with context menu
+
+⚡ **Instant response** — direct control via Windows Core Audio API with no delays
 
 ---
 
@@ -101,23 +107,22 @@ On first launch, the program creates the following files in the application dire
 ```
 
 MicroOff/
-├── devices_cache.json # Cached list of audio devices
 └── error_log.txt # Error log file
 
 ```
 
 **Important:**
-- The cache file speeds up loading by storing the last known device list
 - The error log helps with debugging if issues occur
-- Both files are automatically created and managed by the program
+- All devices are detected in real-time via Windows Core Audio API
+- No caching is used — the device list is always up to date
 
 ---
 
-## 🛠️ Technical Requirements
+## 🛠️ System Requirements
 
-- **OS**: Windows 10/11
-- **PowerShell**: Pre-installed on Windows
-- **AudioDeviceCmdlets**: Auto-installed on first run via PowerShell Gallery
+- **OS**: Windows 10/11 (64-bit)
+- **Architecture**: x64
+- **Libraries**: All required libraries are included in the EXE file
 
 ---
 
@@ -125,8 +130,9 @@ MicroOff/
 
 ### Prerequisites
 
-1. Install Python 3.8 or higher
+1. Install Python 3.8 or higher (64-bit)
 2. Clone the repository:
+
 ```bash
 git clone https://github.com/AlexeyZam15/micro_off.git
 cd micro_off
@@ -162,7 +168,7 @@ micro_off/
 └── src/
     ├── __init__.py
     ├── logger.py             # Logging module
-    ├── microphone_controller.py  # Microphone control logic
+    ├── microphone_controller.py  # Microphone control logic (pycaw)
     ├── widgets.py            # Custom UI widgets
     ├── tray_icon.py          # System tray integration
     ├── hotkey_manager.py     # Global hotkey management
@@ -170,6 +176,25 @@ micro_off/
     ├── ui_builder.py         # UI builder
     └── main_window.py        # Main application window
 ```
+
+---
+
+## 🛠️ Technologies Used
+
+| Component | Purpose |
+|-----------|---------|
+| **pycaw** | Direct audio device control via Windows Core Audio API |
+| **PyQt5** | Graphical user interface (GUI) |
+| **keyboard** | Global hotkey support |
+| **comtypes** | COM object handling for Windows |
+| **PyInstaller** | EXE packaging |
+
+### Advantages of pycaw over PowerShell:
+
+- **Instant operation** — no delays from PowerShell calls
+- **No dependencies** — doesn't require AudioDeviceCmdlets installation
+- **Direct access** — to Windows API without intermediate layers
+- **Stability** — fewer points of failure
 
 ---
 
@@ -191,9 +216,10 @@ This project is distributed under the MIT license. This means free use, modifica
 
 ## 🙏 Acknowledgments
 
+- [pycaw](https://github.com/AndreMiras/pycaw) — Python Core Audio Windows
 - [PyQt5](https://www.riverbankcomputing.com/software/pyqt/) — GUI framework
 - [keyboard](https://github.com/boppreh/keyboard) — Global hotkey support
-- [AudioDeviceCmdlets](https://github.com/frgnca/AudioDeviceCmdlets) — PowerShell audio control
+- [comtypes](https://github.com/enthought/comtypes) — COM interfaces for Python
 - [PyInstaller](https://pyinstaller.org/) — EXE packaging
 
 ---
