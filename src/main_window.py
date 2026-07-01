@@ -92,6 +92,55 @@ class MicrophoneGUI(QMainWindow):
         # Загружаем в фоне
         QTimer.singleShot(100, self.load_devices_async)
 
+    def quit_from_tray(self):
+        """
+        Завершение программы через системный трей.
+        Включает все устройства перед закрытием.
+        """
+        print("🚀 Выход через системный трей...")
+
+        # Показываем уведомление
+        self.tray_icon.showMessage(
+            "MicroOff",
+            "Завершение работы... Включение всех устройств",
+            QSystemTrayIcon.Information,
+            1500
+        )
+
+        # Сворачиваем окно
+        self.hide()
+
+        # Даем время на показ уведомления
+        time.sleep(0.5)
+
+        # Включаем все устройства
+        try:
+            print("🔄 Включение всех устройств...")
+            self.controller.unmute_all_devices()
+            print("✅ Все устройства включены")
+        except Exception as e:
+            Logger.log_error("Ошибка включения устройств при выходе", e)
+
+        # Останавливаем потоки
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.stop()
+            self.worker.wait()
+            self.worker = None
+
+        if hasattr(self, 'device_loader') and self.device_loader:
+            self.device_loader.quit()
+            self.device_loader.wait()
+            self.device_loader = None
+
+        if hasattr(self, 'controller'):
+            self.controller.close()
+
+        if hasattr(self, 'hotkey_manager'):
+            self.hotkey_manager.unregister_hotkeys()
+
+        # Завершаем приложение
+        QApplication.quit()
+
     def refresh_devices_background(self):
         """
         Фоновое обновление списка устройств без блокировки UI.
@@ -565,49 +614,8 @@ class MicrophoneGUI(QMainWindow):
         self._is_closing = True
         event.accept()
 
-        print("Закрытие программы...")
-
-        # Сворачиваем окно в трей
-        self.hide()
-
-        # Показываем уведомление о завершении
-        self.tray_icon.showMessage(
-            "MicroOff",
-            "Завершение работы... Включение всех устройств",
-            QSystemTrayIcon.Information,
-            1500
-        )
-
-        # Даем время на показ уведомления
-        time.sleep(0.5)
-
-        # Синхронно включаем все устройства
-        try:
-            print("🔄 Включение всех устройств...")
-            self.controller.unmute_all_devices()
-            print("✅ Все устройства включены")
-        except Exception as e:
-            Logger.log_error("Ошибка включения устройств при закрытии", e)
-
-        # Останавливаем рабочие потоки
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.stop()
-            self.worker.wait()
-            self.worker = None
-
-        if hasattr(self, 'device_loader') and self.device_loader:
-            self.device_loader.quit()
-            self.device_loader.wait()
-            self.device_loader = None
-
-        if hasattr(self, 'controller'):
-            self.controller.close()
-
-        if hasattr(self, 'hotkey_manager'):
-            self.hotkey_manager.unregister_hotkeys()
-
-        # Завершаем приложение
-        QApplication.quit()
+        # Вызываем метод завершения
+        self.quit_from_tray()
 
     def __del__(self):
         """

@@ -1,5 +1,6 @@
 """
 Модуль системного трея для приложения MicroOff.
+
 Обеспечивает иконку в системном трее с контекстным меню.
 """
 
@@ -123,7 +124,27 @@ class SystemTrayIcon(QSystemTrayIcon):
 
     def quit_app(self):
         """
-        Закрывает приложение.
+        Закрывает приложение с включением всех устройств.
         """
-        self.parent.controller.close()
-        QApplication.quit()
+        try:
+            print("🚀 Выход через системный трей...")
+
+            # Показываем уведомление
+            self.showMessage(
+                "MicroOff",
+                "Завершение работы... Включение всех устройств",
+                QSystemTrayIcon.Information,
+                1500
+            )
+
+            # Вызываем метод закрытия родительского окна
+            # Это запустит closeEvent с включением всех устройств
+            if self.parent:
+                self.parent.close()
+            else:
+                # Если родителя нет, просто завершаем
+                QApplication.quit()
+
+        except Exception as e:
+            Logger.log_error("Ошибка при выходе из трея", e)
+            QApplication.quit()

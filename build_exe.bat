@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title Сборка MicroOff
+title Сборка MicroOff (с правами администратора)
 
 echo ========================================
-echo   СБОРКА MicroOff
+echo   СБОРКА MicroOff (через манифест)
 echo ========================================
 echo.
 
@@ -25,12 +25,40 @@ echo Очистка кэша Python...
 rmdir /s /q __pycache__ 2>nul
 rmdir /s /q src\__pycache__ 2>nul
 
+echo.
+echo Создание манифеста...
+
+(
+echo ^<?xml version="1.0" encoding="UTF-8" standalone="yes"?^>
+echo ^<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"^>
+echo   ^<assemblyIdentity
+echo     version="1.0.0.0"
+echo     processorArchitecture="X86"
+echo     name="MicroOff"
+echo     type="win32"
+echo   /^>
+echo   ^<description^>MicroOff - Microphone Controller^</description^>
+echo   ^<trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"^>
+echo     ^<security^>
+echo       ^<requestedPrivileges^>
+echo         ^<requestedExecutionLevel level="requireAdministrator" uiAccess="false"/^>
+echo       ^</requestedPrivileges^>
+echo     ^</security^>
+echo   ^</trustInfo^>
+echo ^</assembly^>
+) > microoff.manifest
+
+echo ✅ Манифест создан
+echo.
+
 echo Сборка исполняемого файла...
 
 pyinstaller --onefile ^
     --windowed ^
     --name="MicroOff" ^
     --add-data "src;src" ^
+    --add-data "microoff.manifest;." ^
+    --manifest "microoff.manifest" ^
     --hidden-import=PyQt5 ^
     --hidden-import=PyQt5.QtCore ^
     --hidden-import=PyQt5.QtGui ^
@@ -52,6 +80,8 @@ pyinstaller --onefile ^
     --hidden-import=time ^
     --hidden-import=os ^
     --hidden-import=json ^
+    --hidden-import=datetime ^
+    --hidden-import=re ^
     --collect-all PyQt5 ^
     --collect-all keyboard ^
     --collect-all comtypes ^
@@ -68,21 +98,21 @@ if errorlevel 1 (
 )
 
 echo.
+echo Очистка временных файлов...
+del /q microoff.manifest 2>nul
+
+echo.
 echo ========================================
 echo   ✅ СБОРКА ЗАВЕРШЕНА
 echo ========================================
 echo.
 echo Исполняемый файл: dist\MicroOff.exe
-echo Размер: ~40-60 МБ
 echo.
 
-:: Проверка наличия файла
 if exist "dist\MicroOff.exe" (
-    echo ✅ Файл создан успешно!
     echo.
-    echo Для запуска: dist\MicroOff.exe
-) else (
-    echo ⚠️ Файл не найден. Возможно ошибка сборки.
+    echo 📌 При запуске программа запросит права администратора
+    echo    Это необходимо для работы глобальных горячих клавиш
 )
 
 pause
