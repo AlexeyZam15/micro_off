@@ -18,8 +18,8 @@
 ➡️ **[Download the latest version](https://github.com/AlexeyZam15/micro_off/releases/latest)**
 
 1. Go to the **Releases** section on GitHub
-2. Download the `MicroOff.exe` file
-3. Run the file — no installation required
+2. Download the archive file
+3. Extract and run the file `MicroOff.exe`
 
 ---
 
